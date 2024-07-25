@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"log"
 	"net"
+	"time"
 
-	"github.com/brianvoe/gofakeit"
+	sq "github.com/Masterminds/squirrel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/fursserg/auth/db"
 	user "github.com/fursserg/auth/pkg/user_v1"
 )
 
@@ -39,34 +43,119 @@ type server struct {
 }
 
 func (s *server) Create(ctx context.Context, req *user.CreateRequest) (*user.CreateResponse, error) {
-	log.Printf("User create data: %+v", req)
+	builderInsert := sq.Insert("users").
+		PlaceholderFormat(sq.Dollar).
+		Columns("name", "email", "password", "role", "status").
+		Values(req.GetName(), req.GetEmail(), sha256.Sum256([]byte(req.GetPassword())), req.GetRole(), "1").
+		Suffix("RETURNING id")
+
+	query, args, err := builderInsert.ToSql()
+	if err != nil {
+		log.Fatalf("failed to build query: %v", err)
+	}
+
+	var userID int64
+	err = db.GetInstance().QueryRow(ctx, query, args...).Scan(&userID)
+	if err != nil {
+		log.Fatalf("failed to insert user: %v", err)
+	}
 
 	return &user.CreateResponse{
-		Id: gofakeit.Int64(),
+		Id: userID,
 	}, nil
 }
 
 func (s *server) Update(ctx context.Context, req *user.UpdateRequest) (*emptypb.Empty, error) {
-	log.Printf("User update data: %+v", req)
+	hasChanges := false
+
+	builderUpdate := sq.Update("users").
+		PlaceholderFormat(sq.Dollar)
+
+	if req.GetName() != nil {
+		builderUpdate = builderUpdate.Set("name", req.GetName().GetValue())
+		hasChanges = true
+	}
+
+	if req.GetEmail() != nil {
+		builderUpdate = builderUpdate.Set("email", req.GetEmail().GetValue())
+		hasChanges = true
+	}
+
+	if req.GetRole() != user.Role_UNKNOWN {
+		builderUpdate = builderUpdate.Set("role", req.GetRole())
+		hasChanges = true
+	}
+
+	if hasChanges {
+		builderUpdate = builderUpdate.Set("updated_at", time.Now()).
+			Where(sq.Eq{"id": req.GetId()})
+
+		query, args, err := builderUpdate.ToSql()
+
+		if err != nil {
+			log.Fatalf("failed to build query: %v", err)
+		}
+
+		_, err = db.GetInstance().Exec(ctx, query, args...)
+		if err != nil {
+			log.Fatalf("failed to update user: %v", err)
+		}
+	}
 
 	return new(emptypb.Empty), nil
 }
 
 func (s *server) Delete(ctx context.Context, req *user.DeleteRequest) (*emptypb.Empty, error) {
-	log.Printf("User delete id: %d", req.GetId())
+	// Вместо удаления, переводим в специальный статус (храним в БД для истории)
+	builderUpdate := sq.Update("users").
+		PlaceholderFormat(sq.Dollar).
+		Set("status", "10").
+		Set("updated_at", time.Now()).
+		Where(sq.Eq{"id": req.GetId()})
+
+	query, args, err := builderUpdate.ToSql()
+	if err != nil {
+		log.Fatalf("failed to build query: %v", err)
+	}
+
+	_, err = db.GetInstance().Exec(ctx, query, args...)
+	if err != nil {
+		log.Fatalf("failed to delete user: %v", err)
+	}
 
 	return new(emptypb.Empty), nil
 }
 
 func (s *server) Get(ctx context.Context, req *user.GetRequest) (*user.GetResponse, error) {
-	log.Printf("User get id: %d", req.GetId())
+	builderInsert := sq.Select("id", "name", "email", "role", "created_at", "updated_at").
+		PlaceholderFormat(sq.Dollar).
+		From("users").
+		Where(sq.Eq{"id": req.GetId()}).
+		Limit(1)
+
+	query, args, err := builderInsert.ToSql()
+	if err != nil {
+		log.Fatalf("failed to build query: %v", err)
+	}
+
+	var (
+		id, role    int64
+		name, email string
+		createdAt   time.Time
+		updatedAt   sql.NullTime
+	)
+
+	err = db.GetInstance().QueryRow(ctx, query, args...).Scan(&id, &name, &email, &role, &createdAt, &updatedAt)
+	if err != nil {
+		log.Fatalf("failed to select user: %v", err)
+	}
 
 	return &user.GetResponse{
-		Id:        req.GetId(),
-		Name:      gofakeit.Name(),
-		Email:     gofakeit.Email(),
-		Role:      1,
-		CreatedAt: timestamppb.New(gofakeit.Date()),
-		UpdatedAt: timestamppb.New(gofakeit.Date()),
+		Id:        id,
+		Name:      name,
+		Email:     email,
+		Role:      user.Role(role),
+		CreatedAt: timestamppb.New(createdAt),
+		UpdatedAt: timestamppb.New(updatedAt.Time),
 	}, nil
 }
