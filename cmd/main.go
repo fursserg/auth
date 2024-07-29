@@ -42,11 +42,19 @@ type server struct {
 	user.UnimplementedUserV1Server
 }
 
+// Create Создает нового юзера
 func (s *server) Create(ctx context.Context, req *user.CreateRequest) (*user.CreateResponse, error) {
+	status, err := db.Statuses.Get("active")
+	if err != nil {
+		log.Fatalf("failed to prepare query: %v", err)
+	}
+
+	pass := sha256.Sum256([]byte(req.GetPassword()))
+
 	builderInsert := sq.Insert("users").
 		PlaceholderFormat(sq.Dollar).
 		Columns("name", "email", "password", "role", "status").
-		Values(req.GetName(), req.GetEmail(), sha256.Sum256([]byte(req.GetPassword())), req.GetRole(), "1").
+		Values(req.GetName(), req.GetEmail(), fmt.Sprintf("%x", pass), req.GetRole(), status).
 		Suffix("RETURNING id")
 
 	query, args, err := builderInsert.ToSql()
@@ -55,7 +63,7 @@ func (s *server) Create(ctx context.Context, req *user.CreateRequest) (*user.Cre
 	}
 
 	var userID int64
-	err = db.GetInstance().QueryRow(ctx, query, args...).Scan(&userID)
+	err = db.GetConnect().QueryRow(ctx, query, args...).Scan(&userID)
 	if err != nil {
 		log.Fatalf("failed to insert user: %v", err)
 	}
@@ -65,28 +73,14 @@ func (s *server) Create(ctx context.Context, req *user.CreateRequest) (*user.Cre
 	}, nil
 }
 
+// Update Обновляет юзера
 func (s *server) Update(ctx context.Context, req *user.UpdateRequest) (*emptypb.Empty, error) {
 	hasChanges := false
 
 	builderUpdate := sq.Update("users").
 		PlaceholderFormat(sq.Dollar)
 
-	if req.GetName() != nil {
-		builderUpdate = builderUpdate.Set("name", req.GetName().GetValue())
-		hasChanges = true
-	}
-
-	if req.GetEmail() != nil {
-		builderUpdate = builderUpdate.Set("email", req.GetEmail().GetValue())
-		hasChanges = true
-	}
-
-	if req.GetRole() != user.Role_UNKNOWN {
-		builderUpdate = builderUpdate.Set("role", req.GetRole())
-		hasChanges = true
-	}
-
-	if hasChanges {
+	if hasChanges, builderUpdate = s.hasChanges(req, builderUpdate); hasChanges {
 		builderUpdate = builderUpdate.Set("updated_at", time.Now()).
 			Where(sq.Eq{"id": req.GetId()})
 
@@ -96,7 +90,7 @@ func (s *server) Update(ctx context.Context, req *user.UpdateRequest) (*emptypb.
 			log.Fatalf("failed to build query: %v", err)
 		}
 
-		_, err = db.GetInstance().Exec(ctx, query, args...)
+		_, err = db.GetConnect().Exec(ctx, query, args...)
 		if err != nil {
 			log.Fatalf("failed to update user: %v", err)
 		}
@@ -105,11 +99,17 @@ func (s *server) Update(ctx context.Context, req *user.UpdateRequest) (*emptypb.
 	return new(emptypb.Empty), nil
 }
 
+// Delete Переводит юзера в статус "удален"
 func (s *server) Delete(ctx context.Context, req *user.DeleteRequest) (*emptypb.Empty, error) {
+	status, err := db.Statuses.Get("deleted")
+	if err != nil {
+		log.Fatalf("failed to prepare query: %v", err)
+	}
+
 	// Вместо удаления, переводим в специальный статус (храним в БД для истории)
 	builderUpdate := sq.Update("users").
 		PlaceholderFormat(sq.Dollar).
-		Set("status", "10").
+		Set("status", status).
 		Set("updated_at", time.Now()).
 		Where(sq.Eq{"id": req.GetId()})
 
@@ -118,7 +118,7 @@ func (s *server) Delete(ctx context.Context, req *user.DeleteRequest) (*emptypb.
 		log.Fatalf("failed to build query: %v", err)
 	}
 
-	_, err = db.GetInstance().Exec(ctx, query, args...)
+	_, err = db.GetConnect().Exec(ctx, query, args...)
 	if err != nil {
 		log.Fatalf("failed to delete user: %v", err)
 	}
@@ -126,6 +126,7 @@ func (s *server) Delete(ctx context.Context, req *user.DeleteRequest) (*emptypb.
 	return new(emptypb.Empty), nil
 }
 
+// Get получает одного юзера
 func (s *server) Get(ctx context.Context, req *user.GetRequest) (*user.GetResponse, error) {
 	builderInsert := sq.Select("id", "name", "email", "role", "created_at", "updated_at").
 		PlaceholderFormat(sq.Dollar).
@@ -145,7 +146,7 @@ func (s *server) Get(ctx context.Context, req *user.GetRequest) (*user.GetRespon
 		updatedAt   sql.NullTime
 	)
 
-	err = db.GetInstance().QueryRow(ctx, query, args...).Scan(&id, &name, &email, &role, &createdAt, &updatedAt)
+	err = db.GetConnect().QueryRow(ctx, query, args...).Scan(&id, &name, &email, &role, &createdAt, &updatedAt)
 	if err != nil {
 		log.Fatalf("failed to select user: %v", err)
 	}
@@ -158,4 +159,25 @@ func (s *server) Get(ctx context.Context, req *user.GetRequest) (*user.GetRespon
 		CreatedAt: timestamppb.New(createdAt),
 		UpdatedAt: timestamppb.New(updatedAt.Time),
 	}, nil
+}
+
+func (s *server) hasChanges(req *user.UpdateRequest, builder sq.UpdateBuilder) (bool, sq.UpdateBuilder) {
+	hasChanges := false
+
+	if req.GetName() != nil {
+		builder = builder.Set("name", req.GetName().GetValue())
+		hasChanges = true
+	}
+
+	if req.GetEmail() != nil {
+		builder = builder.Set("email", req.GetEmail().GetValue())
+		hasChanges = true
+	}
+
+	if req.GetRole() != user.Role_UNKNOWN {
+		builder = builder.Set("role", req.GetRole())
+		hasChanges = true
+	}
+
+	return hasChanges, builder
 }
