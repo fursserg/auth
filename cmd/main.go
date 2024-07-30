@@ -44,17 +44,12 @@ type server struct {
 
 // Create Создает нового юзера
 func (s *server) Create(ctx context.Context, req *user.CreateRequest) (*user.CreateResponse, error) {
-	status, err := db.Statuses.Get("active")
-	if err != nil {
-		log.Fatalf("failed to prepare query: %v", err)
-	}
-
 	pass := sha256.Sum256([]byte(req.GetPassword()))
 
 	builderInsert := sq.Insert("users").
 		PlaceholderFormat(sq.Dollar).
 		Columns("name", "email", "password", "role", "status").
-		Values(req.GetName(), req.GetEmail(), fmt.Sprintf("%x", pass), req.GetRole(), status).
+		Values(req.GetName(), req.GetEmail(), fmt.Sprintf("%x", pass), req.GetRole(), db.ActiveStatus).
 		Suffix("RETURNING id")
 
 	query, args, err := builderInsert.ToSql()
@@ -101,15 +96,10 @@ func (s *server) Update(ctx context.Context, req *user.UpdateRequest) (*emptypb.
 
 // Delete Переводит юзера в статус "удален"
 func (s *server) Delete(ctx context.Context, req *user.DeleteRequest) (*emptypb.Empty, error) {
-	status, err := db.Statuses.Get("deleted")
-	if err != nil {
-		log.Fatalf("failed to prepare query: %v", err)
-	}
-
 	// Вместо удаления, переводим в специальный статус (храним в БД для истории)
 	builderUpdate := sq.Update("users").
 		PlaceholderFormat(sq.Dollar).
-		Set("status", status).
+		Set("status", db.DeletedStatus).
 		Set("updated_at", time.Now()).
 		Where(sq.Eq{"id": req.GetId()})
 

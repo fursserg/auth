@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 
@@ -11,28 +10,14 @@ import (
 
 const (
 	dbDSN         = "host=localhost port=54322 dbname=auth user=auth password=abcdef sslmode=disable"
-	activeStatus  = 1
-	deletedStatus = 10
+	ActiveStatus  = 1
+	DeletedStatus = 10
 )
 
 var (
 	connect *pgxpool.Pool
 	once    sync.Once
 )
-
-type Statuses string
-
-// Get Получает номер статуса по названию
-func (s Statuses) Get() (int, error) {
-	switch s {
-	case "active":
-		return activeStatus, nil
-	case "deleted":
-		return deletedStatus, nil
-	default:
-		return 0, fmt.Errorf("undefined status")
-	}
-}
 
 // GetConnect Получает коннект к БД.
 // Если ранее коннект уже был установлен, то его и вернет,
